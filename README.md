@@ -20,11 +20,13 @@ the evidence and judge the report. Consensus then settles the escrow:
 - The wallet reads its caller-specific withdrawable credit through `get_my_withdrawable()`, avoiding
   a fragile frontend conversion from a hex string to the contract's `Address` type.
 
-The frontend is wallet-only and keeps the contract address configurable. The previous Studionet
-test deployment is `0x43A18CFd4407D37761cDFD5aD11896ee9DE50F16` (chain ID `61999`).
-It does **not** include the new evidence-recovery refund path; this source requires a fresh
-deployment and a frontend address update before that path is live.
-Earlier deployments predate the settlement fairness fix and must not be substituted for it.
+The frontend is wallet-only and keeps the contract address configurable. The current Studionet
+deployment is [`0x6a1E0dca18012655708E6c2DBEc79F968822DCA4`](https://explorer-studio.genlayer.com/address/0x6a1E0dca18012655708E6c2DBEc79F968822DCA4)
+(chain ID `61999`), finalized in [transaction `0xe704…4d94`](https://explorer-studio.genlayer.com/tx/0xe70431bc5aa0e4ee9630237c424334bd35ae06c37a25941da6ea87b0dbeb4d94).
+The deployed source and this repository's `contracts/source_bounty.py` match after line-ending
+normalization (SHA-256 `05B6F34B5C71A02A94B24DDFEB170250E88605D7F53B04E62DBDC0144CD8812D`).
+Earlier deployments, including `0x43A18CFd4407D37761cDFD5aD11896ee9DE50F16`, remain separate;
+their bounty state is not migrated to the new contract.
 The local two-wallet test completed create → claim → submit → consensus approval → withdraw,
 including a final zero withdrawable-credit reading. This is test evidence, not a formal audit.
 

@@ -3,11 +3,14 @@ import { studionet } from "genlayer-js/chains";
 import "./styles.css";
 
 const ZERO = "0x0000000000000000000000000000000000000000";
-const LEGACY_CONTRACT = "0x47bbc16ACbAFb18CBd8a896fb147AEA71DD95134";
-const CURRENT_CONTRACT = "0x43A18CFd4407D37761cDFD5aD11896ee9DE50F16";
+const OUTDATED_CONTRACTS = [
+  "0x47bbc16ACbAFb18CBd8a896fb147AEA71DD95134",
+  "0x43A18CFd4407D37761cDFD5aD11896ee9DE50F16",
+].map((address) => address.toLowerCase());
+const CURRENT_CONTRACT = "0x6a1E0dca18012655708E6c2DBEc79F968822DCA4";
 const configuredContract = localStorage.getItem("sourcebounty.contract") || "";
-// Never silently point a fixed frontend at the pre-fix deployment.
-const DEFAULT_CONTRACT = configuredContract && configuredContract.toLowerCase() !== LEGACY_CONTRACT.toLowerCase() ? configuredContract : CURRENT_CONTRACT;
+// Preserve custom deployments, but migrate known earlier defaults automatically.
+const DEFAULT_CONTRACT = configuredContract && !OUTDATED_CONTRACTS.includes(configuredContract.toLowerCase()) ? configuredContract : CURRENT_CONTRACT;
 const ABI = [
   { type: "function", name: "list_bounties", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
   { type: "function", name: "get_bounty", stateMutability: "view", inputs: [{ name: "bounty_id", type: "string" }], outputs: [{ type: "string" }] },
