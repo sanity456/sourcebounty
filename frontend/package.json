@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "genlayer-js": "1.1.8",
-    "vite": "7.1.9"
-  },
-  "devDependencies": {}
+    "vite": "7.3.7"
+  }
 }
