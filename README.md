@@ -48,7 +48,8 @@ From the workspace root:
 ```powershell
 $lint = 'C:\Users\user\.codex\runtimes\genlayer-new12-20260821\Scripts\genvm-lint.exe'
 $env:PYTHONIOENCODING = 'utf-8'
-& $lint lint sourcebounty\contracts\source_bounty.py
+$env:GENVM_VERSION = 'v0.2.16'
+& $lint check sourcebounty\contracts\source_bounty.py
 ```
 
 The contract must retain the pinned `Depends` runner on line 1. Do not replace it with `test`,
