@@ -7,18 +7,23 @@ the evidence and judge the report. Consensus then settles the escrow:
 
 - `APPROVE` → the contributor receives withdrawable GEN.
 - `REVISE` → the escrow stays locked and the contributor can submit again, for up to three revision rounds.
-- `RETRY` → evidence fetching was unavailable; the existing submission and escrow remain pending without extending the deadline or incrementing revisions.
+- `RETRY` → evidence fetching was unavailable; the existing submission and escrow remain pending. The first `RETRY` sets a fixed recovery deadline at the later of the original delivery deadline and three days after that review.
 - `REJECT` → the customer receives withdrawable GEN.
 - expiry/cancellation → the customer receives a deterministic refund for work that was not submitted.
-- submitted work is never expired; the customer or claimant can request the consensus review so a
-  customer cannot receive a delivery and reclaim its escrow by staying silent.
-- Evidence fetch outages do not trigger a revision, refund, or deadline extension. After three
+- A submitted bounty cannot be expired merely because its delivery deadline passes. If evidence
+  remains unresolved after the fixed recovery deadline, only the customer can invoke
+  `refund_unavailable_bounty`. The claimant may replace evidence before that timestamp; both
+  parties may request another review. Replacement or repeated `RETRY` does not extend the window.
+  A successful review settles escrow normally. The contract's chain timestamp is authoritative.
+- Evidence fetch outages do not immediately trigger a revision or refund. After three
   substantive revision rounds, another revision result becomes a final rejection/refund.
 - The wallet reads its caller-specific withdrawable credit through `get_my_withdrawable()`, avoiding
   a fragile frontend conversion from a hex string to the contract's `Address` type.
 
-The frontend is wallet-only and keeps the contract address configurable. The current Studionet
+The frontend is wallet-only and keeps the contract address configurable. The previous Studionet
 test deployment is `0x43A18CFd4407D37761cDFD5aD11896ee9DE50F16` (chain ID `61999`).
+It does **not** include the new evidence-recovery refund path; this source requires a fresh
+deployment and a frontend address update before that path is live.
 Earlier deployments predate the settlement fairness fix and must not be substituted for it.
 The local two-wallet test completed create → claim → submit → consensus approval → withdraw,
 including a final zero withdrawable-credit reading. This is test evidence, not a formal audit.

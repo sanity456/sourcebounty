@@ -7,6 +7,8 @@ does not substitute for a multi-validator Studionet integration test.
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 CONTRACT = "contracts/source_bounty.py"
 START = "2035-01-01T00:00:00Z"
 START_TS = int(datetime(2035, 1, 1, tzinfo=timezone.utc).timestamp())
@@ -92,6 +94,19 @@ def test_reject_refunds_only_customer(direct_vm, direct_deploy, direct_alice, di
         contract.expire_bounty(bounty_id)
 
 
+def test_validator_disagrees_when_independent_review_changes_payout(direct_vm, direct_deploy, direct_alice, direct_bob):
+    contract = direct_deploy(CONTRACT)
+    bounty_id = create_bounty(direct_vm, contract, direct_alice)
+    submit(direct_vm, contract, direct_bob, bounty_id)
+    mock_review(direct_vm, "APPROVE", 90, "PASS")
+    contract.evaluate_submission(bounty_id)
+
+    # Direct mode executes the leader first; run the captured validator with
+    # independent web/LLM mocks to check the equivalence rule itself.
+    mock_review(direct_vm, "REJECT", 20, "OUT_OF_SCOPE")
+    assert direct_vm.run_validator() is False
+
+
 def test_revision_keeps_escrow_and_grants_real_response_window(direct_vm, direct_deploy, direct_alice, direct_bob):
     contract = direct_deploy(CONTRACT)
     bounty_id = create_bounty(direct_vm, contract, direct_alice, deadline_days=1)
@@ -115,22 +130,103 @@ def test_revision_keeps_escrow_and_grants_real_response_window(direct_vm, direct
 
 def test_evidence_outage_preserves_submission_until_retry(direct_vm, direct_deploy, direct_alice, direct_bob):
     contract = direct_deploy(CONTRACT)
-    bounty_id = create_bounty(direct_vm, contract, direct_alice)
+    bounty_id = create_bounty(direct_vm, contract, direct_alice, deadline_days=1)
     submit(direct_vm, contract, direct_bob, bounty_id)
     direct_vm.clear_mocks()  # No render mock: the source is unavailable.
 
     result = json.loads(contract.evaluate_submission(bounty_id))
     assert result["decision"] == "RETRY"
     assert result["reason_code"] == "EVIDENCE_UNAVAILABLE"
+    assert int(contract.get_bounty(bounty_id)["retry_deadline"]) == START_TS + 3 * DAY
     assert_escrow(contract, bounty_id, "SUBMITTED", REWARD, direct_alice, direct_bob)
     assert contract.get_bounty(bounty_id)["revision_count"] == "0"
     with direct_vm.expect_revert("already settled"):
         contract.expire_bounty(bounty_id)
 
+    direct_vm.warp("2035-01-03T00:00:00Z")  # Original delivery deadline has passed.
+    direct_vm.sender = direct_bob
+    contract.submit_work(bounty_id, REPORT + " Replacement reachable source.", json.dumps([EVIDENCE_URL]))
+    assert contract.get_bounty(bounty_id)["review_json"] == ""
+    assert int(contract.get_bounty(bounty_id)["retry_deadline"]) == START_TS + 3 * DAY
+    assert_escrow(contract, bounty_id, "SUBMITTED", REWARD, direct_alice, direct_bob)
+
     mock_review(direct_vm, "APPROVE", 90, "PASS")
-    direct_vm.sender = direct_bob  # Claimant may trigger review if customer is absent.
+    # Claimant may trigger review if customer is absent.
     contract.evaluate_submission(bounty_id)
     assert_escrow(contract, bounty_id, "REVIEWED", 0, direct_alice, direct_bob, claimant_credit=REWARD)
+    assert contract.get_bounty(bounty_id)["retry_deadline"] == "0"
+
+
+def test_retry_deadline_is_fixed_and_only_customer_can_refund_at_boundary(
+    direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie
+):
+    contract = direct_deploy(CONTRACT)
+    bounty_id = create_bounty(direct_vm, contract, direct_alice, deadline_days=1)
+    submit(direct_vm, contract, direct_bob, bounty_id)
+    direct_vm.clear_mocks()
+    contract.evaluate_submission(bounty_id)
+    deadline = START_TS + 3 * DAY
+    assert int(contract.get_bounty(bounty_id)["retry_deadline"]) == deadline
+
+    direct_vm.warp("2035-01-02T00:00:00Z")
+    contract.evaluate_submission(bounty_id)
+    assert int(contract.get_bounty(bounty_id)["retry_deadline"]) == deadline
+    direct_vm.sender = direct_bob
+    contract.submit_work(bounty_id, REPORT + " Replacement source.", json.dumps([EVIDENCE_URL]))
+    assert int(contract.get_bounty(bounty_id)["retry_deadline"]) == deadline
+    contract.evaluate_submission(bounty_id)
+    assert int(contract.get_bounty(bounty_id)["retry_deadline"]) == deadline
+
+    direct_vm.sender = direct_alice
+    direct_vm.warp("2035-01-03T23:59:59Z")
+    with direct_vm.expect_revert("has not passed"):
+        contract.refund_unavailable_bounty(bounty_id)
+    assert_escrow(contract, bounty_id, "SUBMITTED", REWARD, direct_alice, direct_bob)
+
+    direct_vm.warp("2035-01-04T00:00:00Z")
+    direct_vm.sender = direct_charlie
+    with direct_vm.expect_revert("Only the customer"):
+        contract.refund_unavailable_bounty(bounty_id)
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("replacement window has passed"):
+        contract.submit_work(bounty_id, REPORT + " Too late.", json.dumps([EVIDENCE_URL]))
+    direct_vm.sender = direct_alice
+    contract.refund_unavailable_bounty(bounty_id)
+    assert_escrow(contract, bounty_id, "EXPIRED", 0, direct_alice, direct_bob, customer_credit=REWARD)
+    with direct_vm.expect_revert("no unresolved evidence outage"):
+        contract.refund_unavailable_bounty(bounty_id)
+
+
+def test_replacement_pending_after_retry_deadline_can_be_refunded(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    contract = direct_deploy(CONTRACT)
+    bounty_id = create_bounty(direct_vm, contract, direct_alice, deadline_days=1)
+    submit(direct_vm, contract, direct_bob, bounty_id)
+    direct_vm.clear_mocks()
+    contract.evaluate_submission(bounty_id)
+    direct_vm.sender = direct_bob
+    contract.submit_work(bounty_id, REPORT + " Replacement source.", json.dumps([EVIDENCE_URL]))
+    direct_vm.warp("2035-01-04T00:00:00Z")
+    direct_vm.sender = direct_alice
+    contract.refund_unavailable_bounty(bounty_id)
+    assert_escrow(contract, bounty_id, "EXPIRED", 0, direct_alice, direct_bob, customer_credit=REWARD)
+
+
+def test_early_retry_never_shortens_original_delivery_deadline(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    contract = direct_deploy(CONTRACT)
+    bounty_id = create_bounty(direct_vm, contract, direct_alice, deadline_days=7)
+    submit(direct_vm, contract, direct_bob, bounty_id)
+    direct_vm.clear_mocks()
+    contract.evaluate_submission(bounty_id)
+    assert int(contract.get_bounty(bounty_id)["retry_deadline"]) == START_TS + 7 * DAY
+    direct_vm.warp("2035-01-04T00:00:00Z")
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("has not passed"):
+        contract.refund_unavailable_bounty(bounty_id)
+    assert_escrow(contract, bounty_id, "SUBMITTED", REWARD, direct_alice, direct_bob)
 
 
 def test_fourth_revision_becomes_refund(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -222,6 +318,26 @@ def test_empty_withdrawal_reverts_without_credit_change(direct_vm, direct_deploy
     with direct_vm.expect_revert("No withdrawable GEN"):
         contract.withdraw()
     assert credit(contract, direct_alice) == 0
+
+
+@pytest.mark.parametrize("unsafe_url", [
+    "http://example.com/research",
+    "https://localhost/research",
+    "https://127.0.0.1/research",
+    "https://169.254.169.254/latest/meta-data",
+    "https://internal.local/report",
+    "https://user@example.com/report",
+    "https://example.com:8443/report",
+    "https://example.com/space here",
+])
+def test_unsafe_evidence_url_cannot_lock_submitted_work(direct_vm, direct_deploy, direct_alice, direct_bob, unsafe_url):
+    contract = direct_deploy(CONTRACT)
+    bounty_id = create_bounty(direct_vm, contract, direct_alice)
+    direct_vm.sender = direct_bob
+    contract.claim_bounty(bounty_id)
+    with direct_vm.expect_revert("Evidence"):
+        contract.submit_work(bounty_id, REPORT, json.dumps([unsafe_url]))
+    assert_escrow(contract, bounty_id, "CLAIMED", REWARD, direct_alice, direct_bob)
 
 
 def test_refund_withdrawal_clears_credit_once(direct_vm, direct_deploy, direct_alice):

@@ -18,6 +18,7 @@ const ABI = [
   { type: "function", name: "evaluate_submission", stateMutability: "nonpayable", inputs: [{ name: "bounty_id", type: "string" }], outputs: [{ type: "string" }] },
   { type: "function", name: "cancel_bounty", stateMutability: "nonpayable", inputs: [{ name: "bounty_id", type: "string" }], outputs: [] },
   { type: "function", name: "expire_bounty", stateMutability: "nonpayable", inputs: [{ name: "bounty_id", type: "string" }], outputs: [] },
+  { type: "function", name: "refund_unavailable_bounty", stateMutability: "nonpayable", inputs: [{ name: "bounty_id", type: "string" }], outputs: [] },
   { type: "function", name: "withdraw", stateMutability: "nonpayable", inputs: [], outputs: [{ type: "uint256" }] },
 ];
 
@@ -236,21 +237,30 @@ function detailPanel() {
   if (!b) return `<div class="empty-detail"><div class="orbit-mark">◎</div><h2>Pick a bounty</h2><p>Open a brief to see the evidence standard, claim the work, or review a submission.</p></div>`;
   const isCustomer = state.account && b.customer?.toLowerCase() === state.account.toLowerCase();
   const isClaimant = state.account && b.claimed_by?.toLowerCase() === state.account.toLowerCase();
+  let lastReview = null;
+  if (b.review_json) { try { lastReview = JSON.parse(b.review_json); } catch { /* Ignore malformed display data. */ } }
+  const retryAvailable = b.status === "SUBMITTED" && lastReview?.decision === "RETRY";
+  const retryDeadline = Number(b.retry_deadline || 0);
+  const recoveryOpen = b.status === "SUBMITTED" && retryDeadline > 0;
+  const recoveryExpired = recoveryOpen && Math.floor(Date.now() / 1000) >= retryDeadline;
   let actions = "";
   if (b.status === "OPEN" && !isCustomer) actions += `<button class="primary action" data-action="claim">Claim this brief <span>↗</span></button>`;
   if ((b.status === "CLAIMED" || b.status === "REVISION") && isClaimant) actions += `<button class="primary action" data-action="submit">Submit research <span>↗</span></button>`;
   if (b.status === "SUBMITTED" && (isCustomer || isClaimant)) actions += `<button class="primary action" data-action="evaluate">Run consensus review <span>↗</span></button>`;
+  if (retryAvailable && isClaimant && !recoveryExpired) actions += `<button class="quiet action" data-action="submit">Replace unreachable evidence</button>`;
+  if (recoveryOpen && isCustomer && recoveryExpired) actions += `<button class="quiet action" data-action="refund-unavailable">Refund unresolved bounty</button>`;
   if (b.status === "OPEN" && isCustomer) actions += `<button class="quiet action" data-action="cancel">Cancel & refund</button>`;
   if (["OPEN", "CLAIMED", "REVISION"].includes(b.status)) actions += `<button class="quiet action" data-action="expire">Check expiry</button>`;
   const evidence = (() => { try { return JSON.parse(b.evidence_json || "[]"); } catch { return []; } })();
   let review = "";
-  if (b.review_json) { try { const r = JSON.parse(b.review_json); const retry = r.decision === "RETRY"; review = `<div class="review ${retry ? "review-retry" : ""}"><div class="card-top"><span class="eyebrow">${retry ? "Review paused · retry available" : "Consensus result"}</span>${retry ? "" : `<strong>${esc(r.score)}/100</strong>`}</div><p>${esc(r.summary)}</p><span class="reason">${esc(r.reason_code)}</span></div>`; } catch { review = ""; } }
+  if (lastReview) { const r = lastReview; const retry = r.decision === "RETRY"; review = `<div class="review ${retry ? "review-retry" : ""}"><div class="card-top"><span class="eyebrow">${retry ? "Review paused · retry available" : "Consensus result"}</span>${retry ? "" : `<strong>${esc(r.score)}/100</strong>`}</div><p>${esc(r.summary)}</p><span class="reason">${esc(r.reason_code)}</span></div>`; }
   return `<article class="detail-card">
     <div class="detail-kicker"><span class="status status-${esc(b.status)}">${statusLabel(b.status)}</span><span>${toGen(b.reward)} GEN escrow</span></div>
     <h2>${esc(b.title)}</h2><p class="detail-brief">${esc(b.brief)}</p>
     <div class="rule"><span>Success rubric</span><p>${esc(b.rubric)}</p></div>
     ${b.report ? `<div class="rule"><span>Latest submission</span><p class="report-preview">${esc(b.report)}</p><div class="evidence-list">${evidence.map((u) => `<a href="${esc(u)}" target="_blank" rel="noreferrer">${esc(u)}</a>`).join("")}</div></div>` : ""}
     ${review}
+    ${recoveryOpen ? `<div class="rule"><span>Evidence recovery</span><p>Review must resolve by ${new Date(retryDeadline * 1000).toLocaleString()}. Replacing evidence does not extend this deadline; after it, the customer can refund unresolved escrow. The contract's chain timestamp decides eligibility.</p></div>` : ""}
     ${state.submitOpen && isClaimant ? `<form id="submit-form" class="submit-form"><label>Report<textarea name="report" minlength="40" maxlength="12000" required placeholder="Paste the completed research report"></textarea></label><label>Evidence URLs<textarea name="evidence" required placeholder="One https:// URL per line"></textarea></label><div class="form-row"><button class="primary" type="submit">Submit for review ↗</button><button class="quiet" type="button" data-action="close-submit">Cancel</button></div></form>` : ""}
     <div class="detail-footer"><span>Deadline ${new Date(Number(b.deadline) * 1000).toLocaleString()}</span><div class="actions">${actions}</div></div>
   </article>`;
@@ -297,6 +307,7 @@ async function handleAction(action) {
   if (action === "claim") await write("claim_bounty", [id]);
   if (action === "cancel") await write("cancel_bounty", [id]);
   if (action === "expire") await write("expire_bounty", [id]);
+  if (action === "refund-unavailable") await write("refund_unavailable_bounty", [id]);
   if (action === "evaluate") await write("evaluate_submission", [id]);
   if (action === "submit") { state.submitOpen = true; state.error = ""; render(); return; }
   if (action === "close-submit") { state.submitOpen = false; render(); return; }

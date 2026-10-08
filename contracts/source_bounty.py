@@ -43,6 +43,7 @@ MAX_REPORT = 12000
 MAX_EVIDENCE = 8000
 MIN_DEADLINE_SECONDS = 3600
 REVISION_WINDOW_SECONDS = 3 * 86400
+RETRY_WINDOW_SECONDS = 3 * 86400
 MAX_REVISION_COUNT = 3
 
 
@@ -64,6 +65,7 @@ class Bounty:
     evidence_json: str
     review_json: str
     revision_count: u256
+    retry_deadline: u256
 
 
 @gl.evm.contract_interface
@@ -229,10 +231,21 @@ class SourceBounty(gl.Contract):
         if len(evidence) > 12:
             raise gl.vm.UserError("Evidence is limited to 12 URLs")
         for item in evidence:
-            if not isinstance(item, str) or not item.startswith(("https://", "http://")):
-                raise gl.vm.UserError("Evidence entries must be HTTP(S) URLs")
+            if not isinstance(item, str) or not item.startswith("https://"):
+                raise gl.vm.UserError("Evidence entries must be HTTPS URLs")
             if len(item) > 500:
                 raise gl.vm.UserError("Evidence URL is too long")
+            if any(ord(character) <= 32 or ord(character) == 127 for character in item):
+                raise gl.vm.UserError("Evidence URL contains whitespace or controls")
+            authority = item[8:].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].lower().rstrip(".")
+            if not authority or "@" in authority or ":" in authority or "[" in authority or "]" in authority:
+                raise gl.vm.UserError("Evidence URL must use a public DNS host")
+            labels = authority.split(".")
+            if len(labels) < 2 or authority.endswith(".local") or authority.endswith(".localhost") or labels[-1].isdigit():
+                raise gl.vm.UserError("Evidence URL must use a public DNS host")
+            allowed = "abcdefghijklmnopqrstuvwxyz0123456789-"
+            if any(not label or len(label) > 63 or label[0] == "-" or label[-1] == "-" or any(char not in allowed for char in label) for label in labels):
+                raise gl.vm.UserError("Evidence URL host is invalid")
         return evidence
 
     def _bounty(self, bounty_id: str) -> Bounty:
@@ -274,6 +287,7 @@ class SourceBounty(gl.Contract):
             evidence_json="[]",
             review_json="",
             revision_count=u256(0),
+            retry_deadline=u256(0),
         )
         self.bounty_ids.append(bounty_id)
         self.next_id += u256(1)
@@ -297,10 +311,17 @@ class SourceBounty(gl.Contract):
         bounty = self._bounty(bounty_id)
         if bounty.claimed_by != gl.message.sender_address:
             raise gl.vm.UserError("Only the claimant can submit work")
-        if bounty.status not in (STATUS_CLAIMED, STATUS_REVISION):
+        retry_submission = (
+            bounty.status == STATUS_SUBMITTED
+            and bool(bounty.review_json)
+            and json.loads(bounty.review_json).get("decision") == DECISION_RETRY
+        )
+        if bounty.status not in (STATUS_CLAIMED, STATUS_REVISION) and not retry_submission:
             raise gl.vm.UserError("Bounty is not accepting a submission")
-        if self._now() >= bounty.deadline:
+        if self._now() >= bounty.deadline and not retry_submission:
             raise gl.vm.UserError("Bounty deadline has passed")
+        if retry_submission and self._now() >= bounty.retry_deadline:
+            raise gl.vm.UserError("Evidence replacement window has passed")
         self._require_text(report, "Report", MAX_REPORT, 40)
         self._parse_evidence(evidence_json)
         bounty.report = report.strip()
@@ -340,8 +361,13 @@ class SourceBounty(gl.Contract):
             raise gl.vm.UserError("[LLM_ERROR] Consensus review was malformed")
         decision = str(review.get("decision", "")).upper()
         if decision == DECISION_RETRY:
-            # Preserve the pending submission and escrow without extending any
-            # deadlines or incrementing revision counters. The caller may retry.
+            # Start the recovery clock once. Repeated reviews or replacement
+            # submissions must never extend the customer's refund deadline.
+            if bounty.retry_deadline == u256(0):
+                bounty.retry_deadline = self._max_u256(
+                    bounty.deadline,
+                    self._now() + u256(RETRY_WINDOW_SECONDS),
+                )
             bounty.review_json = json.dumps(review, sort_keys=True)
             self.bounties[bounty_id] = bounty
             return json.dumps(review, sort_keys=True)
@@ -355,6 +381,7 @@ class SourceBounty(gl.Contract):
             review["summary"] = "Revision limit reached. " + str(review.get("summary", ""))
             decision = DECISION_REJECT
         bounty.review_json = json.dumps(review, sort_keys=True)
+        bounty.retry_deadline = u256(0)
         bounty.status = STATUS_REVIEWED
         if bounty.reward == u256(0):
             raise gl.vm.UserError("Escrow has already been settled")
@@ -410,6 +437,24 @@ class SourceBounty(gl.Contract):
         self.bounties[bounty_id] = bounty
 
     @gl.public.write
+    def refund_unavailable_bounty(self, bounty_id: str) -> None:
+        """Let the customer reclaim escrow after unresolved evidence outage."""
+        bounty = self._bounty(bounty_id)
+        if gl.message.sender_address != bounty.customer:
+            raise gl.vm.UserError("Only the customer can request an outage refund")
+        if bounty.status != STATUS_SUBMITTED or bounty.retry_deadline == u256(0):
+            raise gl.vm.UserError("Bounty has no unresolved evidence outage")
+        if self._now() < bounty.retry_deadline:
+            raise gl.vm.UserError("Evidence recovery window has not passed")
+        refund = bounty.reward
+        if refund == u256(0):
+            raise gl.vm.UserError("Escrow has already been settled")
+        bounty.reward = u256(0)
+        bounty.status = STATUS_EXPIRED
+        self._credit(bounty.customer, refund)
+        self.bounties[bounty_id] = bounty
+
+    @gl.public.write
     def withdraw(self) -> u256:
         """Withdraw settled credits as a finalized native GEN transfer."""
         account = gl.message.sender_address
@@ -439,6 +484,7 @@ class SourceBounty(gl.Contract):
             "evidence_json": bounty.evidence_json,
             "review_json": bounty.review_json,
             "revision_count": str(bounty.revision_count),
+            "retry_deadline": str(bounty.retry_deadline),
         }
 
     @gl.public.view
@@ -456,6 +502,7 @@ class SourceBounty(gl.Contract):
                 "claimed_by": str(bounty.claimed_by),
                 "status": bounty.status,
                 "revision_count": str(bounty.revision_count),
+                "retry_deadline": str(bounty.retry_deadline),
             })
         return result
 
