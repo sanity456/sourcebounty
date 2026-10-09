@@ -59,6 +59,7 @@ This was a two-wallet end-to-end QA run against the deployed Studionet contract.
 - Public GitHub Actions at the tested revision: [run 37806963535 succeeded](https://github.com/sanity456/sourcebounty/actions/runs/37806963535).
 - Public demo returned HTTP 200: [sourcebounty.vercel.app](https://sourcebounty.vercel.app).
 - The public GitHub repository is accessible without signing in: [sanity456/sourcebounty](https://github.com/sanity456/sourcebounty).
+- Unauthenticated HTTP GET checks for every Explorer, GitHub, and demo link in this report returned HTTP 200.
 - `genlayer code` retrieved the deployed source; byte-for-byte text comparison matched the repository after line-ending normalization and removal of its final newline. SHA-256: `05B6F34B5C71A02A94B24DDFEB170250E88605D7F53B04E62DBDC0144CD8812D`.
 
 ## Scope and limitations
